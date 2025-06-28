@@ -30,6 +30,11 @@ admin.initializeApp({
 const db = admin.firestore();
 app.use(express.json());
 
+app.get('/ping', (req, res) => {
+  res.send('pong');
+});
+
+
 app.use((req, res, next) => {
   const start = process.hrtime();
 
