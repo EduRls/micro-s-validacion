@@ -120,9 +120,13 @@ app.post('/validar-informacion', async (req, res) => {
       const asignacionDoc = await asignacionDocRef.get();
 
       if (!asignacionDoc.exists) {
-        resultados.push({ id_cilindro: IDCILINDRO, id_vendedor: IDVENDEDOR, estado: false });
+        const exito = await buscarYValidarDocumento(IDVENDEDOR, IDCILINDRO, resultados);
+        if (!exito) {
+          resultados.push({ id_cilindro: IDCILINDRO, id_vendedor: IDVENDEDOR, estado: false });
+        }
         continue;
       }
+
 
       const productosMap = asignacionDoc.data().productos || {};
       const productos = extraerProductos(productosMap);
@@ -165,12 +169,61 @@ app.post('/validar-informacion', async (req, res) => {
       resultados.push({ id_cilindro: IDCILINDRO, id_vendedor: IDVENDEDOR, estado: true });
     }
 
-    res.json(resultados.estado);
+    res.json(resultados);
   } catch (error) {
     console.error('Error al procesar ventas:', error);
     res.status(500).json({ error: 'Error interno del servidor' });
   }
 });
+
+async function buscarYValidarDocumento(IDVENDEDOR, IDCILINDRO, resultados) {
+  const snapshot = await db.collection('asignacion_diaria')
+    .where('id_vendedor', '==', IDVENDEDOR)
+    .get();
+
+  if (snapshot.empty) return false;
+
+  for (const docSnap of snapshot.docs) {
+    const docRef = docSnap.ref;
+    const productosMap = docSnap.data().productos || {};
+    const productos = extraerProductos(productosMap);
+
+    const index = productos.findIndex(p => p.idCilindro === IDCILINDRO);
+    if (index === -1) continue;
+
+    const cilindroData = productos[index].datos;
+    if (cilindroData.estado_venta !== 'asignado') continue;
+
+    // Actualizar historial
+    const historialRef = db.collection('asignacion').doc(IDVENDEDOR);
+    const historialDoc = await historialRef.get();
+    let historialData = historialDoc.exists ? historialDoc.data() : {};
+    if (!Array.isArray(historialData.productos)) historialData.productos = [];
+
+    const nuevoProducto = {
+      [IDCILINDRO]: {
+        ...cilindroData,
+        estado_venta: 'vendido',
+        fecha_venta: new Date().toISOString()
+      }
+    };
+
+    historialData.productos.push(nuevoProducto);
+    await historialRef.set({ productos: historialData.productos }, { merge: true });
+
+    // Actualizar asignación_diaria
+    productos.splice(index, 1);
+    const nuevoProductosMap = reconstruirProductosMap(productos);
+    await docRef.update({ productos: nuevoProductosMap });
+
+    resultados.push({ id_cilindro: IDCILINDRO, id_vendedor: IDVENDEDOR, estado: true });
+    return true; // ✅ Ya lo encontramos y procesamos, no buscamos más
+  }
+
+  return false; // 🔴 No se encontró en ninguno de los documentos
+}
+
+
 
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en http://localhost:${PORT}`);
