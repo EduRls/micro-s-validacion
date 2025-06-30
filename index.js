@@ -21,12 +21,12 @@ const serviceAccount = JSON.parse(
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });
+
 /*
 admin.initializeApp({
   credential: admin.credential.cert(require('./autolog-13584-firebase-adminsdk-lic3j-bc9d0d95eb.json'))
 });
 */
-
 const db = admin.firestore();
 app.use(express.json());
 
@@ -118,11 +118,12 @@ app.post('/validar-informacion', async (req, res) => {
 
       const asignacionDocRef = db.collection('asignacion_diaria').doc(IDVENDEDOR);
       const asignacionDoc = await asignacionDocRef.get();
+      console.log(asignacionDoc)
 
       if (!asignacionDoc.exists) {
-        console.log("No lo encontró en el primero")
+
         const exito = await buscarYValidarDocumento(IDVENDEDOR, IDCILINDRO, resultados);
-        
+
         if (!exito) {
           resultados.push({ id_cilindro: IDCILINDRO, id_vendedor: IDVENDEDOR, estado: false });
         }
@@ -134,8 +135,12 @@ app.post('/validar-informacion', async (req, res) => {
       const productos = extraerProductos(productosMap);
 
       const index = productos.findIndex(p => p.idCilindro === IDCILINDRO);
+
       if (index === -1) {
-        resultados.push({ id_cilindro: IDCILINDRO, id_vendedor: IDVENDEDOR, estado: false });
+        const exito = await buscarYValidarDocumento(IDVENDEDOR, IDCILINDRO, resultados);
+        if (!exito) {
+          resultados.push({ id_cilindro: IDCILINDRO, id_vendedor: IDVENDEDOR, estado: false });
+        }
         continue;
       }
 
@@ -179,29 +184,43 @@ app.post('/validar-informacion', async (req, res) => {
 });
 
 async function buscarYValidarDocumento(IDVENDEDOR, IDCILINDRO, resultados) {
+
   const snapshot = await db.collection('asignacion_diaria')
     .where('id_vendedor', '==', IDVENDEDOR)
     .get();
 
 
-  if (snapshot.empty) return false;
+  if (snapshot.empty) {
+    return false;
+  }
 
   for (const docSnap of snapshot.docs) {
     const docRef = docSnap.ref;
     const productosMap = docSnap.data().productos || {};
     const productos = extraerProductos(productosMap);
 
-    const index = productos.findIndex(p => p.idCilindro === IDCILINDRO);
-    if (index === -1) continue;
+    const index = productos.findIndex(
+      p => p.idCilindro.trim() === IDCILINDRO.trim()
+    );
+    if (index === -1) {
+      console.log(`⚠️ El cilindro "${IDCILINDRO}" NO se encontró en este documento (${docRef.id})`);
+      continue;
+    }
 
     const cilindroData = productos[index].datos;
-    if (cilindroData.estado_venta !== 'asignado') continue;
+
+    if (cilindroData.estado_venta !== 'asignado') {
+      console.log(`⚠️ El cilindro "${IDCILINDRO}" se encontró pero no está asignado. Estado actual: ${cilindroData.estado_venta}`);
+      continue;
+    }
 
     // Actualizar historial
     const historialRef = db.collection('asignacion').doc(IDVENDEDOR);
     const historialDoc = await historialRef.get();
     let historialData = historialDoc.exists ? historialDoc.data() : {};
-    if (!Array.isArray(historialData.productos)) historialData.productos = [];
+    if (!Array.isArray(historialData.productos)) {
+      historialData.productos = [];
+    }
 
     const nuevoProducto = {
       [IDCILINDRO]: {
@@ -214,17 +233,21 @@ async function buscarYValidarDocumento(IDVENDEDOR, IDCILINDRO, resultados) {
     historialData.productos.push(nuevoProducto);
     await historialRef.set({ productos: historialData.productos }, { merge: true });
 
-    // Actualizar asignación_diaria
+    // Actualizar asignacion_diaria
     productos.splice(index, 1);
     const nuevoProductosMap = reconstruirProductosMap(productos);
     await docRef.update({ productos: nuevoProductosMap });
 
     resultados.push({ id_cilindro: IDCILINDRO, id_vendedor: IDVENDEDOR, estado: true });
-    return true; // ✅ Ya lo encontramos y procesamos, no buscamos más
+    console.log(`✅ Cilindro "${IDCILINDRO}" validado y actualizado correctamente en documento: ${docRef.id}`);
+
+    return true;
   }
 
-  return false; // 🔴 No se encontró en ninguno de los documentos
+  console.log(`❌ Ninguno de los documentos contenía el cilindro "${IDCILINDRO}" en estado válido`);
+  return false;
 }
+
 
 
 
