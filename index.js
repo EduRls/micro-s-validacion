@@ -175,7 +175,7 @@ app.post('/validar-informacion', async (req, res) => {
       resultados.push({ id_cilindro: IDCILINDRO, id_vendedor: IDVENDEDOR, estado: true });
     }
 
-    res.json(resultados.estado);
+    res.json(resultados[0].estado);
   } catch (error) {
     console.error('Error al procesar ventas:', error);
     res.status(500).json({ error: 'Error interno del servidor' });
