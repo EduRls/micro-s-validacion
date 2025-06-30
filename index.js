@@ -118,7 +118,6 @@ app.post('/validar-informacion', async (req, res) => {
 
       const asignacionDocRef = db.collection('asignacion_diaria').doc(IDVENDEDOR);
       const asignacionDoc = await asignacionDocRef.get();
-      console.log(asignacionDoc)
 
       if (!asignacionDoc.exists) {
 
@@ -176,7 +175,7 @@ app.post('/validar-informacion', async (req, res) => {
       resultados.push({ id_cilindro: IDCILINDRO, id_vendedor: IDVENDEDOR, estado: true });
     }
 
-    res.json(resultados);
+    res.json(resultados.estado);
   } catch (error) {
     console.error('Error al procesar ventas:', error);
     res.status(500).json({ error: 'Error interno del servidor' });
