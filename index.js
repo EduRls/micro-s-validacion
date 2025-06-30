@@ -120,7 +120,9 @@ app.post('/validar-informacion', async (req, res) => {
       const asignacionDoc = await asignacionDocRef.get();
 
       if (!asignacionDoc.exists) {
+        console.log("No lo encontró en el primero")
         const exito = await buscarYValidarDocumento(IDVENDEDOR, IDCILINDRO, resultados);
+        
         if (!exito) {
           resultados.push({ id_cilindro: IDCILINDRO, id_vendedor: IDVENDEDOR, estado: false });
         }
@@ -180,6 +182,7 @@ async function buscarYValidarDocumento(IDVENDEDOR, IDCILINDRO, resultados) {
   const snapshot = await db.collection('asignacion_diaria')
     .where('id_vendedor', '==', IDVENDEDOR)
     .get();
+
 
   if (snapshot.empty) return false;
 
