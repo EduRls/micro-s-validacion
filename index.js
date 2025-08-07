@@ -22,11 +22,13 @@ admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });
 
+
 /*
 admin.initializeApp({
-  credential: admin.credential.cert(require('./autolog-13584-firebase-adminsdk-lic3j-bc9d0d95eb.json'))
+  credential: admin.credential.cert(require('./cosas.json'))
 });
 */
+
 const db = admin.firestore();
 app.use(express.json());
 
@@ -34,219 +36,176 @@ app.get('/ping', (req, res) => {
   res.send('pong');
 });
 
-
-app.use((req, res, next) => {
-  const start = process.hrtime();
-
-  res.on('finish', () => {
-    const diff = process.hrtime(start);
-    const timeInMs = (diff[0] * 1e3 + diff[1] / 1e6).toFixed(2);
-
-    const method = req.method.padEnd(6);
-    const url = req.originalUrl.padEnd(50);
-    const maxLength = 80;
-    const dotsCount = Math.max(0, maxLength - method.length - url.length);
-    const dots = '.'.repeat(dotsCount);
-
-    console.log(`${method} ${url}${dots} ${res.statusCode} [${timeInMs} ms]`);
-  });
-
-  next();
-});
-
-app.use(express.json()); // Asegura que puedes recibir JSON en el body
-
-
-function parsearVenta(texto) {
-  const partes = texto.split(';');
-  const result = {};
-
-  partes.forEach(p => {
-    const [clave, valor] = p.split(':');
-    if (clave && valor) {
-      result[clave.trim().toUpperCase()] = valor.trim();
-    }
-  });
-
-  return {
-    IDCILINDRO: result.IDCILINDRO || null,
-    IDVENDEDOR: result.IDVENDEDOR || null
-  };
-}
-
-function extraerProductos(productosMap) {
-  const productos = [];
-  if (typeof productosMap === 'object' && productosMap !== null) {
-    for (const key of Object.keys(productosMap)) {
-      const entrada = productosMap[key];
-      if (typeof entrada === 'object' && entrada !== null) {
-        const idCilindro = Object.keys(entrada)[0];
-        const datos = entrada[idCilindro];
-        productos.push({ idCilindro, datos });
-      }
-    }
-  }
-  return productos;
-}
-
-function reconstruirProductosMap(productos) {
-  const map = {};
-  productos.forEach((p, i) => {
-    map[i] = {
-      [p.idCilindro]: p.datos
-    };
-  });
-  return map;
-}
 /*
-Esta función genera reportes
+Consultar la colección
 */
-app.post('/validar-informacion', async (req, res) => {
+app.get('/verificar', async (req, res) => {
   try {
-    const body = req.body.data || '';
-    const ventas = body.split('|').map(v => v.trim()).filter(v => v);
-    const resultados = [];
+    const ventas = await obtenerVentas();
+    const resultado = await procesarVentas(ventas);
 
-    for (const venta of ventas) {
-      const parsed = parsearVenta(venta);
-      const { IDCILINDRO, IDVENDEDOR } = parsed;
+    res.status(200).json({
+      ok: true,
+      total: ventas.length,
+      sospechosas: resultado.sospechosas.length,
+      inventario_no_coincide: resultado.inventarioNoCoincide.length,
+      detalles_inventario_no_coincide: resultado.inventarioNoCoincide
+    });
 
-      if (!IDCILINDRO || !IDVENDEDOR) {
-        resultados.push({ id_cilindro: IDCILINDRO || 'N/A', id_vendedor: IDVENDEDOR || 'N/A', estado: false });
-        continue;
-      }
-
-      const asignacionDocRef = db.collection('asignacion_diaria').doc(IDVENDEDOR);
-      const asignacionDoc = await asignacionDocRef.get();
-
-      if (!asignacionDoc.exists) {
-
-        const exito = await buscarYValidarDocumento(IDVENDEDOR, IDCILINDRO, resultados);
-
-        if (!exito) {
-          resultados.push({ id_cilindro: IDCILINDRO, id_vendedor: IDVENDEDOR, estado: false });
-        }
-        continue;
-      }
-
-
-      const productosMap = asignacionDoc.data().productos || {};
-      const productos = extraerProductos(productosMap);
-
-      const index = productos.findIndex(p => p.idCilindro === IDCILINDRO);
-
-      if (index === -1) {
-        const exito = await buscarYValidarDocumento(IDVENDEDOR, IDCILINDRO, resultados);
-        if (!exito) {
-          resultados.push({ id_cilindro: IDCILINDRO, id_vendedor: IDVENDEDOR, estado: false });
-        }
-        continue;
-      }
-
-      const cilindroData = productos[index].datos;
-
-      if (cilindroData.estado_venta !== 'asignado') {
-        resultados.push({ id_cilindro: IDCILINDRO, id_vendedor: IDVENDEDOR, estado: false });
-        continue;
-      }
-
-      const historialRef = db.collection('asignacion').doc(IDVENDEDOR);
-      const historialDoc = await historialRef.get();
-      let historialData = historialDoc.exists ? historialDoc.data() : {};
-      if (!Array.isArray(historialData.productos)) {
-        historialData.productos = [];
-      }
-
-      const nuevoProducto = {
-        [IDCILINDRO]: {
-          ...cilindroData,
-          estado_venta: 'vendido',
-          fecha_venta: new Date().toISOString()
-        }
-      };
-
-      historialData.productos.push(nuevoProducto);
-      await historialRef.set({ productos: historialData.productos }, { merge: true });
-
-      productos.splice(index, 1);
-      const nuevoProductosMap = reconstruirProductosMap(productos);
-      await asignacionDocRef.update({ productos: nuevoProductosMap });
-
-      resultados.push({ id_cilindro: IDCILINDRO, id_vendedor: IDVENDEDOR, estado: true });
-    }
-
-    res.json(resultados);
   } catch (error) {
-    console.error('Error al procesar ventas:', error);
-    res.status(500).json({ error: 'Error interno del servidor' });
+    console.error('❌ Error general de verificación:', error);
+    res.status(500).json({ ok: false, error: error.message });
   }
 });
 
-async function buscarYValidarDocumento(IDVENDEDOR, IDCILINDRO, resultados) {
 
-  const snapshot = await db.collection('asignacion_diaria')
-    .where('id_vendedor', '==', IDVENDEDOR)
-    .get();
+// 🧪 Función para verificar y duplicar ventas sospechosas
+async function procesarVentas(ventas) {
+  const sospechosas = [];
+  const cilindrosMap = new Map();
+  const inventarioNoCoincide = [];
 
+  // Duplicados
+  for (const venta of ventas) {
+    const idCilindro = venta.ID_CILINDRO;
+    if (!idCilindro) continue;
 
-  if (snapshot.empty) {
+    const fechaVenta = venta.FECHA_VENTA?._seconds || 0;
+
+    if (!cilindrosMap.has(idCilindro)) {
+      cilindrosMap.set(idCilindro, venta);
+    } else {
+      const existente = cilindrosMap.get(idCilindro);
+      const fechaExistente = existente.FECHA_VENTA?._seconds || 0;
+
+      if (fechaVenta < fechaExistente) {
+        sospechosas.push(existente);
+        cilindrosMap.set(idCilindro, venta);
+      } else {
+        sospechosas.push(venta);
+      }
+    }
+  }
+
+  for (const venta of cilindrosMap.values()) {
+    const precio = parseFloat(venta.PRECIO);
+
+    const camposClave = ['ID_CILINDRO', 'ID_VENDEDOR', 'FOLIO', 'PRECIO', 'DOMICILIO'];
+    const tieneCamposNulos = camposClave.some(campo =>
+      venta[campo] === null || venta[campo] === undefined || venta[campo] === ''
+    );
+
+    const ventaInvalida = isNaN(precio) || precio < 0 || precio > 20000;
+
+    // ✅ Validación de inventario activada nuevamente (modo solo lectura)
+    const asignacionValida = await checkAsignacionCorrecta(venta);
+    const asignacionInvalida = !asignacionValida;
+
+    if (asignacionInvalida) {
+      inventarioNoCoincide.push({
+        folio: venta.FOLIO,
+        id_cilindro: venta.ID_CILINDRO,
+        id_vendedor: venta.ID_VENDEDOR
+      });
+    }
+
+    if (ventaInvalida || tieneCamposNulos) {
+      sospechosas.push(venta);
+    }
+  }
+
+  return { sospechosas, inventarioNoCoincide };
+}
+
+async function checkAsignacionCorrecta(venta) {
+  const { ID_VENDEDOR, ID_CILINDRO } = venta;
+  if (!ID_VENDEDOR || !ID_CILINDRO) return false;
+
+  try {
+    const docRef = db.collection('asignacion_diaria').doc(ID_VENDEDOR);
+    const docSnap = await docRef.get();
+
+    if (!docSnap.exists) {
+      console.warn(`📛 No existe asignación para vendedor ${ID_VENDEDOR}`);
+      return false;
+    }
+
+    const data = docSnap.data();
+    const productos = data.productos || {};
+
+    // Recorrer todas las entradas del objeto productos (clave "0", "1", "2", etc.)
+    for (const key in productos) {
+      const producto = productos[key];
+      if (!producto) continue;
+
+      const cilindros = Object.keys(producto);
+      if (cilindros.includes(ID_CILINDRO)) {
+        return true; // ✅ Cilindro encontrado en su asignación
+      }
+    }
+
+    console.warn(`❌ Cilindro ${ID_CILINDRO} no asignado a vendedor ${ID_VENDEDOR}`);
+    return false;
+  } catch (err) {
+    console.error(`🔥 Error al verificar asignación de ${ID_VENDEDOR}:`, err);
     return false;
   }
-
-  for (const docSnap of snapshot.docs) {
-    const docRef = docSnap.ref;
-    const productosMap = docSnap.data().productos || {};
-    const productos = extraerProductos(productosMap);
-
-    const index = productos.findIndex(
-      p => p.idCilindro.trim() === IDCILINDRO.trim()
-    );
-    if (index === -1) {
-      console.log(`⚠️ El cilindro "${IDCILINDRO}" NO se encontró en este documento (${docRef.id})`);
-      continue;
-    }
-
-    const cilindroData = productos[index].datos;
-
-    if (cilindroData.estado_venta !== 'asignado') {
-      console.log(`⚠️ El cilindro "${IDCILINDRO}" se encontró pero no está asignado. Estado actual: ${cilindroData.estado_venta}`);
-      continue;
-    }
-
-    // Actualizar historial
-    const historialRef = db.collection('asignacion').doc(IDVENDEDOR);
-    const historialDoc = await historialRef.get();
-    let historialData = historialDoc.exists ? historialDoc.data() : {};
-    if (!Array.isArray(historialData.productos)) {
-      historialData.productos = [];
-    }
-
-    const nuevoProducto = {
-      [IDCILINDRO]: {
-        ...cilindroData,
-        estado_venta: 'vendido',
-        fecha_venta: new Date().toISOString()
-      }
-    };
-
-    historialData.productos.push(nuevoProducto);
-    await historialRef.set({ productos: historialData.productos }, { merge: true });
-
-    // Actualizar asignacion_diaria
-    productos.splice(index, 1);
-    const nuevoProductosMap = reconstruirProductosMap(productos);
-    await docRef.update({ productos: nuevoProductosMap });
-
-    resultados.push({ id_cilindro: IDCILINDRO, id_vendedor: IDVENDEDOR, estado: true });
-    console.log(`✅ Cilindro "${IDCILINDRO}" validado y actualizado correctamente en documento: ${docRef.id}`);
-
-    return true;
-  }
-
-  console.log(`❌ Ninguno de los documentos contenía el cilindro "${IDCILINDRO}" en estado válido`);
-  return false;
 }
 
+
+// 🔍 Función para obtener todas las ventas
+async function obtenerVentas() {
+  const snapshot = await db.collection('venta_dia_sms').get();
+
+  if (snapshot.empty) return [];
+
+  return snapshot.docs.map(doc => ({
+    id: doc.id,
+    ...doc.data()
+  }));
+}
+
+// 🔄 Mover una venta a las colecciones sospechosas
+async function moverASospechosas(venta) {
+  try {
+    await Promise.all([
+      db.collection('venta_sospechosa').add(venta),
+      db.collection('venta_dia_sospechosa_sms').add(venta)
+    ]);
+
+    console.warn(`🚨 Venta sospechosa registrada (FOLIO=${venta.FOLIO}, CILINDRO=${venta.ID_CILINDRO})`);
+  } catch (err) {
+    console.error('❌ Error al mover venta a sospechosas:', err);
+  }
+}
+
+/*
+Consultar colección
+*/
+
+app.get('/ver-asignacion/:idVendedor', async (req, res) => {
+  const idVendedor = req.params.idVendedor;
+
+  try {
+    const docRef = db.collection('asignacion_diaria').doc(idVendedor);
+    const docSnap = await docRef.get();
+
+    if (!docSnap.exists) {
+      return res.status(404).json({ ok: false, mensaje: `No se encontró asignación para ${idVendedor}` });
+    }
+
+    const data = docSnap.data();
+
+    res.status(200).json({
+      ok: true,
+      id: docSnap.id,
+      asignacion: data
+    });
+  } catch (error) {
+    console.error('❌ Error al obtener asignación:', error);
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
 
 
 
