@@ -23,11 +23,13 @@ admin.initializeApp({
 });
 
 
+
 /*
 admin.initializeApp({
-  credential: admin.credential.cert(require('./cosas.json'))
+  credential: admin.credential.cert(require('./cosa.json'))
 });
 */
+
 
 const db = admin.firestore();
 app.use(express.json());
@@ -65,7 +67,7 @@ async function procesarVentas(ventas) {
   const cilindrosMap = new Map();
   const inventarioNoCoincide = [];
 
-  // Duplicados
+  // 1️⃣ Detectar duplicados por ID_CILINDRO
   for (const venta of ventas) {
     const idCilindro = venta.ID_CILINDRO;
     if (!idCilindro) continue;
@@ -73,21 +75,29 @@ async function procesarVentas(ventas) {
     const fechaVenta = venta.FECHA_VENTA?._seconds || 0;
 
     if (!cilindrosMap.has(idCilindro)) {
-      cilindrosMap.set(idCilindro, venta);
+      cilindrosMap.set(idCilindro, venta); // primera aparición
     } else {
       const existente = cilindrosMap.get(idCilindro);
       const fechaExistente = existente.FECHA_VENTA?._seconds || 0;
 
       if (fechaVenta < fechaExistente) {
+        // el nuevo es más antiguo → mover existente a sospechosas
+        existente.error = 'Duplicado (más reciente)';
         sospechosas.push(existente);
-        cilindrosMap.set(idCilindro, venta);
+        await moverASospechosas(existente);
+
+        cilindrosMap.set(idCilindro, venta); // conservar el más antiguo
       } else {
+        venta.error = 'Duplicado';
         sospechosas.push(venta);
+        await moverASospechosas(venta);
       }
     }
   }
 
+  // 2️⃣ Validaciones por venta única
   for (const venta of cilindrosMap.values()) {
+    const errores = [];
     const precio = parseFloat(venta.PRECIO);
 
     const camposClave = ['ID_CILINDRO', 'ID_VENDEDOR', 'FOLIO', 'PRECIO', 'DOMICILIO'];
@@ -96,12 +106,13 @@ async function procesarVentas(ventas) {
     );
 
     const ventaInvalida = isNaN(precio) || precio < 0 || precio > 20000;
-
-    // ✅ Validación de inventario activada nuevamente (modo solo lectura)
     const asignacionValida = await checkAsignacionCorrecta(venta);
     const asignacionInvalida = !asignacionValida;
 
+    if (tieneCamposNulos) errores.push('Campos nulos o vacíos');
+    if (ventaInvalida) errores.push('Precio inválido');
     if (asignacionInvalida) {
+      errores.push('Inventario no coincide');
       inventarioNoCoincide.push({
         folio: venta.FOLIO,
         id_cilindro: venta.ID_CILINDRO,
@@ -109,13 +120,29 @@ async function procesarVentas(ventas) {
       });
     }
 
-    if (ventaInvalida || tieneCamposNulos) {
+    if (errores.length > 0) {
+      venta.error = errores.join(' | ');
       sospechosas.push(venta);
+      await moverASospechosas(venta);
+
+      // 🔥 Solo borrar si es precio inválido o campos nulos
+      if (
+        errores.includes('Precio inválido') ||
+        errores.includes('Campos nulos o vacíos')
+      ) {
+        try {
+          await db.collection('venta_dia_sms').doc(venta.id).delete();
+          console.log(`🗑️ Registro eliminado (${venta.id}) por: ${venta.error}`);
+        } catch (err) {
+          console.error(`❌ Error al eliminar venta ${venta.id}:`, err);
+        }
+      }
     }
   }
 
   return { sospechosas, inventarioNoCoincide };
 }
+
 
 async function checkAsignacionCorrecta(venta) {
   const { ID_VENDEDOR, ID_CILINDRO } = venta;
@@ -168,12 +195,14 @@ async function obtenerVentas() {
 // 🔄 Mover una venta a las colecciones sospechosas
 async function moverASospechosas(venta) {
   try {
+    const ventaConError = { ...venta, error: venta.error || 'Sin especificar' };
+
     await Promise.all([
-      db.collection('venta_sospechosa').add(venta),
-      db.collection('venta_dia_sospechosa_sms').add(venta)
+      db.collection('venta_sospechosa').add(ventaConError),
+      db.collection('venta_dia_sospechosa_sms').add(ventaConError)
     ]);
 
-    console.warn(`🚨 Venta sospechosa registrada (FOLIO=${venta.FOLIO}, CILINDRO=${venta.ID_CILINDRO})`);
+    console.warn(`🚨 Venta sospechosa registrada (FOLIO=${venta.FOLIO}) Motivo: ${ventaConError.error}`);
   } catch (err) {
     console.error('❌ Error al mover venta a sospechosas:', err);
   }
