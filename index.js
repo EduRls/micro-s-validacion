@@ -8,6 +8,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const firebaseBase64 = process.env.FIREBASE_CREDENTIALS_BASE64;
 
+
 if (!firebaseBase64) {
   throw new Error('FIREBASE_CREDENTIALS_BASE64 no está definida');
 }
@@ -26,10 +27,9 @@ admin.initializeApp({
 
 /*
 admin.initializeApp({
-  credential: admin.credential.cert(require('./cosa.json'))
+  credential: admin.credential.cert(require('./.json'))
 });
 */
-
 
 const db = admin.firestore();
 app.use(express.json());
@@ -194,19 +194,37 @@ async function obtenerVentas() {
 
 // 🔄 Mover una venta a las colecciones sospechosas
 async function moverASospechosas(venta) {
-  try {
-    const ventaConError = { ...venta, error: venta.error || 'Sin especificar' };
+  const docId = venta.id; // ID original de venta_dia_sms
+  const ventaConError = { ...venta, error: venta.error || 'Sin especificar' };
 
-    await Promise.all([
-      db.collection('venta_sospechosa').add(ventaConError),
-      db.collection('venta_dia_sospechosa_sms').add(ventaConError)
+  try {
+    const sospechosaRef = db.collection('venta_sospechosa').doc(docId);
+    const sospechosaSMSRef = db.collection('venta_dia_sospechosa_sms').doc(docId);
+
+    const [doc1, doc2] = await Promise.all([
+      sospechosaRef.get(),
+      sospechosaSMSRef.get()
     ]);
 
-    console.warn(`🚨 Venta sospechosa registrada (FOLIO=${venta.FOLIO}) Motivo: ${ventaConError.error}`);
+    if (!doc1.exists) {
+      await sospechosaRef.set(ventaConError);
+      console.warn(`🚨 [venta_sospechosa] Nueva sospechosa guardada (ID: ${docId})`);
+    } else {
+      console.log(`ℹ️ [venta_sospechosa] Ya existía, no se duplicó (ID: ${docId})`);
+    }
+
+    if (!doc2.exists) {
+      await sospechosaSMSRef.set(ventaConError);
+      console.warn(`🚨 [venta_dia_sospechosa_sms] Nueva sospechosa guardada (ID: ${docId})`);
+    } else {
+      console.log(`ℹ️ [venta_dia_sospechosa_sms] Ya existía, no se duplicó (ID: ${docId})`);
+    }
+
   } catch (err) {
     console.error('❌ Error al mover venta a sospechosas:', err);
   }
 }
+
 
 /*
 Consultar colección
